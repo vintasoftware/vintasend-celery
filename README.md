@@ -1,3 +1,3 @@
-# VintaSend Django
+# VintaSend Celery
 
-Django implementations for VintaSend
+Celery adapter implementation for VintaSend
