@@ -1,14 +1,14 @@
 import uuid
 from unittest import TestCase
 from unittest.mock import patch
-import pytest
 
 from celery import Celery  # type: ignore
 from vintasend.constants import NotificationStatus, NotificationTypes
-from vintasend.exceptions import NotificationSendError
 from vintasend.services.dataclasses import Notification
 from vintasend.services.notification_backends.stubs.fake_backend import FakeFileBackend
-from vintasend.services.notification_template_renderers.stubs.fake_templated_email_renderer import FakeTemplateRenderer, FakeTemplateRendererWithException
+from vintasend.services.notification_template_renderers.stubs.fake_templated_email_renderer import (
+    FakeTemplateRenderer, FakeTemplateRendererWithException
+)
 from vintasend.services.notification_service import NotificationService, register_context
 from vintasend_celery.services.notification_adapters.celery_adapter_factory import (
     CeleryNotificationAdapter
@@ -30,12 +30,18 @@ class AsyncCeleryFakeEmailAdapter(
 class AsyncCeleryFakeEmailAdapterTestCase(TestCase):
     def setUp(self):
         celery_app.conf.update(task_always_eager=True)
-        self.backend = FakeFileBackend(database_file_name="celery-adapter-tests-notifications.json")
+        self.backend = FakeFileBackend(
+            database_file_name="celery-adapter-tests-notifications.json"
+        )
 
         self.renderer = FakeTemplateRenderer()
-        self.async_adapter = AsyncCeleryFakeEmailAdapter(template_renderer=self.renderer, backend=self.backend)
+        self.async_adapter = AsyncCeleryFakeEmailAdapter(
+            template_renderer=self.renderer, backend=self.backend
+        )
         
-        self.notification_service = NotificationService[AsyncCeleryFakeEmailAdapter, FakeFileBackend](
+        self.notification_service = NotificationService[
+            AsyncCeleryFakeEmailAdapter, FakeFileBackend
+        ](
             [self.async_adapter],
             self.backend,
         )
@@ -90,7 +96,9 @@ class AsyncCeleryFakeEmailAdapterTestCase(TestCase):
         self.backend.notifications.append(notification)
         self.backend._store_notifications()
 
-        with patch("vintasend_celery.services.notification_adapters.celery_adapter_factory.logger.exception") as mock_log_exception:
+        with patch(
+            "vintasend_celery.services.notification_adapters.celery_adapter_factory.logger.exception"
+        ) as mock_log_exception:
             notification_service.send(notification)
 
         mock_log_exception.assert_called_once()
