@@ -1,3 +1,5 @@
+from datetime import datetime
+from decimal import Decimal
 import uuid
 from unittest import TestCase
 from unittest.mock import patch
@@ -5,7 +7,9 @@ from unittest.mock import patch
 from celery import Celery  # type: ignore
 from vintasend.constants import NotificationStatus, NotificationTypes
 from vintasend.services.dataclasses import Notification
-from vintasend.services.notification_backends.stubs.fake_backend import FakeFileBackend
+from vintasend.services.notification_backends.stubs.fake_backend import (
+    FakeFileBackend, FakeFileBackendWithNonSerializableKWArgs, Config
+)
 from vintasend.services.notification_template_renderers.stubs.fake_templated_email_renderer import (
     FakeTemplateRenderer, FakeTemplateRendererWithException
 )
@@ -25,6 +29,26 @@ class AsyncCeleryFakeEmailAdapter(
     FakeEmailAdapter[FakeFileBackend, FakeTemplateRenderer],
 ):
     celery_app = celery_app
+
+class AsyncCeleryFakeEmailAdapterWithBackendWithNonSerializableKWArgs(
+    CeleryNotificationAdapter[FakeFileBackendWithNonSerializableKWArgs, FakeTemplateRenderer],
+    FakeEmailAdapter[FakeFileBackendWithNonSerializableKWArgs, FakeTemplateRenderer],
+):
+    celery_app = celery_app
+    config: Config
+
+    def serialize_config(self) -> dict:
+        return {
+            "config_a": str(self.config.config_a),
+            "config_b": self.config.config_b.isoformat(),
+        }
+
+    def restore_config(self, config: dict) -> Config:
+        self.config = Config(
+            config_a=Decimal(config["config_a"]),
+            config_b=datetime.fromisoformat(config["config_b"]),
+        )
+        return self.config
 
 
 class AsyncCeleryFakeEmailAdapterTestCase(TestCase):
@@ -85,10 +109,7 @@ class AsyncCeleryFakeEmailAdapterTestCase(TestCase):
         renderer = FakeTemplateRendererWithException()
         async_adapter = AsyncCeleryFakeEmailAdapter(template_renderer=renderer, backend=self.backend)
         
-        notification_service = NotificationService[
-            AsyncCeleryFakeEmailAdapter, 
-            FakeFileBackend
-        ](
+        notification_service = NotificationService(
             [async_adapter],
             self.backend,
         )
@@ -97,10 +118,33 @@ class AsyncCeleryFakeEmailAdapterTestCase(TestCase):
         self.backend._store_notifications()
 
         with patch(
-            "vintasend_celery.services.notification_adapters.celery_adapter_factory.logger.exception"
+            "vintasend.tasks.background_tasks.logger.exception"
         ) as mock_log_exception:
             notification_service.send(notification)
 
         mock_log_exception.assert_called_once()
 
         assert len(self.async_adapter.sent_emails) == 0
+
+    def test_backend_with_non_serializable_kwargs(self):
+        notification = self.create_notification()
+        config = Config()
+        backend = FakeFileBackendWithNonSerializableKWArgs(
+            database_file_name="celery-adapter-tests-notifications.json",
+            config=config,
+        )
+        async_adapter = AsyncCeleryFakeEmailAdapterWithBackendWithNonSerializableKWArgs(
+            template_renderer=self.renderer, backend=backend, config=config
+        )
+        
+        notification_service = NotificationService(
+            [async_adapter],
+            backend,
+        )
+
+        backend.notifications.append(notification)
+        backend._store_notifications()
+
+        notification_service.send(notification)
+
+        assert len(backend.notifications) == 1

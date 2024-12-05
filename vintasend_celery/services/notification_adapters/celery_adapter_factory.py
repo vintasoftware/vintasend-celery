@@ -1,25 +1,13 @@
 import datetime
-import logging
-from typing import Generic, TypeVar
+from typing import cast, Generic, TypeVar
 
 from celery import Celery  # type: ignore
 
 from vintasend.services.dataclasses import Notification, NotificationContextDict
-from vintasend.services.notification_adapters.async_base import AsyncBaseNotificationAdapter
+from vintasend.services.notification_adapters.async_base import AsyncBaseNotificationAdapter, NotificationDict
 from vintasend.services.notification_backends.base import BaseNotificationBackend
 from vintasend.services.notification_template_renderers.base import BaseNotificationTemplateRenderer
 from vintasend_celery.tasks.background_tasks import send_notification_task_factory
-from vintasend.exceptions import (
-    NotificationContextGenerationError,
-    NotificationMarkFailedError,
-    NotificationMarkSentError,
-    NotificationSendError,
-    NotificationUserNotFoundError,
-    NotificationBodyTemplateRenderingError,
-)
-
-
-logger = logging.getLogger(__name__)
 
 
 B = TypeVar("B", bound=BaseNotificationBackend)
@@ -31,19 +19,9 @@ class CeleryNotificationAdapter(Generic[B, T], AsyncBaseNotificationAdapter[B, T
     def delayed_send(self, notification_dict: dict, context_dict: dict) -> None:
         notification = self.notification_from_dict(notification_dict)
         context = NotificationContextDict(**context_dict)
-        try:
-            super().send(notification, context)  # type: ignore
-        except (
-            NotificationUserNotFoundError,
-            NotificationContextGenerationError,
-            NotificationMarkFailedError,
-            NotificationMarkSentError,
-            NotificationSendError,
-            NotificationBodyTemplateRenderingError,
-        ) as e:
-            logger.exception(f"Error sending notification {notification.id}: {e}")
+        super().send(notification, context)  # type: ignore
 
-    def notification_to_dict(self, notification: "Notification") -> dict:
+    def notification_to_dict(self, notification: "Notification") -> NotificationDict:
         non_serializable_fields = ["send_after"]
         serialized_notification = {}
         for field in notification.__dataclass_fields__.keys():
@@ -55,7 +33,7 @@ class CeleryNotificationAdapter(Generic[B, T], AsyncBaseNotificationAdapter[B, T
             notification.send_after.isoformat() if notification.send_after else None
         )
 
-        return serialized_notification
+        return cast(NotificationDict, serialized_notification)
 
     def notification_from_dict(self, notification_dict: dict) -> "Notification":
         notification_dict["send_after"] = (
@@ -78,4 +56,5 @@ class CeleryNotificationAdapter(Generic[B, T], AsyncBaseNotificationAdapter[B, T
                 )
             ],
             backend_kwargs=self.backend.backend_kwargs,
+            config=self.serialize_config(),
         )
