@@ -1,150 +1,136 @@
-from datetime import datetime
-from decimal import Decimal
 import uuid
-from unittest import TestCase
 from unittest.mock import patch
 
-from celery import Celery  # type: ignore
+import pytest
 from vintasend.constants import NotificationStatus, NotificationTypes
 from vintasend.services.dataclasses import Notification
 from vintasend.services.notification_backends.stubs.fake_backend import (
-    FakeFileBackend, FakeFileBackendWithNonSerializableKWArgs, Config
-)
-from vintasend.services.notification_template_renderers.stubs.fake_templated_email_renderer import (
-    FakeTemplateRenderer, FakeTemplateRendererWithException
+    Config,
+    FakeFileBackend,
+    FakeFileBackendWithNonSerializableKWArgs,
 )
 from vintasend.services.notification_service import NotificationService, register_context
-from vintasend_celery.services.notification_adapters.celery_adapter_factory import (
-    CeleryNotificationAdapter
-)
-from vintasend.services.notification_adapters.stubs.fake_adapter import (
-    FakeEmailAdapter,
+from vintasend.services.notification_template_renderers.stubs.fake_templated_email_renderer import (
+    FakeTemplateRenderer,
+    FakeTemplateRendererWithException,
 )
 
-
-celery_app = Celery('tasks', broker='amqp://', backend='rpc://')
-
-class AsyncCeleryFakeEmailAdapter(
-    CeleryNotificationAdapter[FakeFileBackend, FakeTemplateRenderer],
-    FakeEmailAdapter[FakeFileBackend, FakeTemplateRenderer],
-):
-    celery_app = celery_app
-
-class AsyncCeleryFakeEmailAdapterWithBackendWithNonSerializableKWArgs(
-    CeleryNotificationAdapter[FakeFileBackendWithNonSerializableKWArgs, FakeTemplateRenderer],
-    FakeEmailAdapter[FakeFileBackendWithNonSerializableKWArgs, FakeTemplateRenderer],
-):
-    celery_app = celery_app
-    config: Config
-
-    def serialize_config(self) -> dict:
-        return {
-            "config_a": str(self.config.config_a),
-            "config_b": self.config.config_b.isoformat(),
-        }
-
-    def restore_config(self, config: dict) -> Config:
-        self.config = Config(
-            config_a=Decimal(config["config_a"]),
-            config_b=datetime.fromisoformat(config["config_b"]),
-        )
-        return self.config
+from example_app.celery import (
+    AsyncCeleryFakeEmailAdapter,
+    AsyncCeleryFakeEmailAdapterWithBackendWithNonSerializableKWArgs,
+)
 
 
-class AsyncCeleryFakeEmailAdapterTestCase(TestCase):
-    def setUp(self):
-        celery_app.conf.update(task_always_eager=True)
-        self.backend = FakeFileBackend(
-            database_file_name="celery-adapter-tests-notifications.json"
-        )
+@pytest.fixture()
+def celery_app():
+    from example_app.celery import celery_app
+    celery_app.conf.update(task_always_eager=True)
+    return celery_app
 
-        self.renderer = FakeTemplateRenderer()
-        self.async_adapter = AsyncCeleryFakeEmailAdapter(
-            template_renderer=self.renderer, backend=self.backend
-        )
-        
-        self.notification_service = NotificationService[
-            AsyncCeleryFakeEmailAdapter, FakeFileBackend
-        ](
-            [self.async_adapter],
-            self.backend,
-        )
 
-    def tearDown(self) -> None:
-        FakeFileBackend(database_file_name="celery-adapter-tests-notifications.json").clear()
-        return super().tearDown()
+@pytest.fixture(scope="function")
+def notification_backend():
+    backend = FakeFileBackend(database_file_name="celery-adapter-tests-notifications.json")
+    yield backend
+    backend.clear()
 
-    def create_notification(self):
-        register_context("test_context")(self.create_notification_context)
-        return Notification(
-            id=uuid.uuid4(),
-            user_id=1,
-            notification_type=NotificationTypes.EMAIL.value,
-            title="Test Notification",
-            body_template="vintasend_django/emails/test/test_templated_email_body.html",
-            context_name="test_context",
-            context_kwargs={"test": "test"},
-            send_after=None,
-            subject_template="vintasend_django/emails/test/test_templated_email_subject.txt",
-            preheader_template="vintasend_django/emails/test/test_templated_email_preheader.html",
-            status=NotificationStatus.PENDING_SEND.value,
-        )
 
-    def create_notification_context(self, test):
-        if test != "test":
-            raise ValueError("Invalid test value")
-        return {"foo": "bar"}
+@pytest.fixture()
+def renderer():
+    return FakeTemplateRenderer()
 
-    def test_send_notification(self):
-        notification = self.create_notification()
-        self.backend.notifications.append(notification)
-        self.backend._store_notifications()
-        
-        self.notification_service.send(notification)
-        assert len(self.backend.notifications) == 1
 
-    def test_send_notification_with_render_error(self):
-        notification = self.create_notification()
+@pytest.fixture()
+def notification_service(notification_backend, renderer):
+    async_adapter = AsyncCeleryFakeEmailAdapter(
+        template_renderer=renderer, backend=notification_backend
+    )
 
-        renderer = FakeTemplateRendererWithException()
-        async_adapter = AsyncCeleryFakeEmailAdapter(template_renderer=renderer, backend=self.backend)
-        
-        notification_service = NotificationService(
-            [async_adapter],
-            self.backend,
-        )
+    notification_service = NotificationService[AsyncCeleryFakeEmailAdapter, FakeFileBackend](
+        [async_adapter],
+        notification_backend,
+    )
 
-        self.backend.notifications.append(notification)
-        self.backend._store_notifications()
+    return notification_service
 
-        with patch(
-            "vintasend.tasks.background_tasks.logger.exception"
-        ) as mock_log_exception:
-            notification_service.send(notification)
 
-        mock_log_exception.assert_called_once()
+def create_notification():
+    register_context("test_context")(create_notification_context)
+    return Notification(
+        id=uuid.uuid4(),
+        user_id=1,
+        notification_type=NotificationTypes.EMAIL.value,
+        title="Test Notification",
+        body_template="vintasend_django/emails/test/test_templated_email_body.html",
+        context_name="test_context",
+        context_kwargs={"test": "test"},
+        send_after=None,
+        subject_template="vintasend_django/emails/test/test_templated_email_subject.txt",
+        preheader_template="vintasend_django/emails/test/test_templated_email_preheader.html",
+        status=NotificationStatus.PENDING_SEND.value,
+    )
 
-        assert len(self.async_adapter.sent_emails) == 0
 
-    def test_backend_with_non_serializable_kwargs(self):
-        notification = self.create_notification()
-        config = Config()
-        backend = FakeFileBackendWithNonSerializableKWArgs(
-            database_file_name="celery-adapter-tests-notifications.json",
-            config=config,
-        )
-        async_adapter = AsyncCeleryFakeEmailAdapterWithBackendWithNonSerializableKWArgs(
-            template_renderer=self.renderer, backend=backend, config=config
-        )
-        
-        notification_service = NotificationService(
-            [async_adapter],
-            backend,
-        )
+def create_notification_context(test):
+    if test != "test":
+        raise ValueError("Invalid test value")
+    return {"foo": "bar"}
 
-        backend.notifications.append(notification)
-        backend._store_notifications()
 
+def test_send_notification(notification_backend, notification_service, celery_app, celery_worker):
+    notification = create_notification()
+    notification_backend.notifications.append(notification)
+    notification_backend._store_notifications()
+
+    notification_service.send(notification)
+    assert len(notification_backend.notifications) == 1
+
+
+def test_send_notification_with_render_error(notification_backend, celery_app, celery_worker):
+    notification = create_notification()
+
+    renderer = FakeTemplateRendererWithException()
+    async_adapter = AsyncCeleryFakeEmailAdapter(
+        template_renderer=renderer, backend=notification_backend
+    )
+
+    notification_service = NotificationService(
+        [async_adapter],
+        notification_backend,
+    )
+
+    notification_backend.notifications.append(notification)
+    notification_backend._store_notifications()
+
+    with patch("vintasend.tasks.background_tasks.logger.exception") as mock_log_exception:
         notification_service.send(notification)
 
-        assert len(backend.notifications) == 1
+    mock_log_exception.assert_called_once()
+
+    assert len(async_adapter.sent_emails) == 0
+
+
+def test_backend_with_non_serializable_kwargs(renderer, celery_app, celery_worker):
+    notification = create_notification()
+    config = Config()
+    backend = FakeFileBackendWithNonSerializableKWArgs(
+        database_file_name="celery-adapter-tests-notifications.json",
+        config=config,
+    )
+    async_adapter = AsyncCeleryFakeEmailAdapterWithBackendWithNonSerializableKWArgs(
+        template_renderer=renderer, backend=backend, config=config
+    )
+
+    notification_service = NotificationService(
+        [async_adapter],
+        backend,
+    )
+
+    backend.notifications.append(notification)
+    backend._store_notifications()
+
+    notification_service.send(notification)
+
+    assert len(backend.notifications) == 1
+
+    backend.clear()

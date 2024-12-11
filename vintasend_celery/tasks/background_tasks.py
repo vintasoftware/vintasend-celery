@@ -1,7 +1,6 @@
 import logging
 
 from celery import Celery  # type: ignore
-
 from vintasend.tasks.background_tasks import send_notification
 
 
