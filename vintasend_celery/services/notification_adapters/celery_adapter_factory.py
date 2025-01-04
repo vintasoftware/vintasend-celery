@@ -15,11 +15,11 @@ from vintasend.services.notification_template_renderers.base import BaseNotifica
 B = TypeVar("B", bound=BaseNotificationBackend)
 T = TypeVar("T", bound=BaseNotificationTemplateRenderer)
 
+
 class CeleryNotificationAdapter(Generic[B, T], AsyncBaseNotificationAdapter[B, T]):
     send_notification_task: Task
 
     def delayed_send(self, notification_dict: NotificationDict, context_dict: dict) -> None:
-        print("ENTROU AQUI!!!!!!!!!!!!!!!")
         notification = self.notification_from_dict(notification_dict)
         context = NotificationContextDict(**context_dict)
         super().send(notification, context)  # type: ignore
@@ -37,7 +37,7 @@ class CeleryNotificationAdapter(Generic[B, T], AsyncBaseNotificationAdapter[B, T
         )
 
         return cast(NotificationDict, serialized_notification)
-    
+
     def _convert_to_uuid(self, value: str) -> uuid.UUID | str:
         try:
             return uuid.UUID(value)
