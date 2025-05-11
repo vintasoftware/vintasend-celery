@@ -1,14 +1,14 @@
 [tool.poetry]
 name = "vintasend-celery"
-version = "0.1.0"
+version = "0.1.1"
 description = "Celery adapter for VintaSend"
 authors = ["Hugo bessa <hugo@vinta.com.br>"]
 license = "MIT"
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "<3.13,>=3.10"
-vintasend = { git = "https://github.com/vintasoftware/vintasend.git", branch = "main" }
+python = "<3.14,>=3.10"
+vintasend = "*"
 celery = "^5.4.0"
 
 
@@ -17,7 +17,6 @@ coverage = "^7.6.4"
 tox = "^4.23.2"
 pytest = "^8.3.3"
 pytest-xdist = {version = "^3.6.1", extras=["psutil"]}
-coveralls = "^4.0.1"
 pytest-cov = "^6.0.0"
 pytest-celery = "^1.1.3"
 
