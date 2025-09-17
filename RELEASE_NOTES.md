@@ -4,8 +4,8 @@
 
 ### 🚀 Major Features
 
-* Support to one-off notifications (to non-users)
-* Support to attachments
+* Support for one-off notifications (to non-users)
+* Support for attachments
 
 ## Version 0.1.4 (Initial Release)
 
