@@ -1,9 +1,10 @@
 import uuid
+from io import BytesIO
 from unittest.mock import patch
 
 import pytest
 from vintasend.constants import NotificationStatus, NotificationTypes
-from vintasend.services.dataclasses import Notification
+from vintasend.services.dataclasses import Notification, NotificationAttachment, OneOffNotification
 from vintasend.services.notification_backends.stubs.fake_backend import (
     Config,
     FakeFileBackend,
@@ -77,7 +78,7 @@ def create_notification_context(test):
     return {"foo": "bar"}
 
 
-def test_send_notification(notification_backend, notification_service, celery_app, celery_worker):
+def test_send_notification(notification_backend, notification_service, celery_app):
     notification = create_notification()
     notification_backend.notifications.append(notification)
     notification_backend._store_notifications()
@@ -86,7 +87,7 @@ def test_send_notification(notification_backend, notification_service, celery_ap
     assert len(notification_backend.notifications) == 1
 
 
-def test_send_notification_with_render_error(notification_backend, celery_app, celery_worker):
+def test_send_notification_with_render_error(notification_backend, celery_app):
     notification = create_notification()
 
     renderer = FakeTemplateRendererWithException()
@@ -110,7 +111,7 @@ def test_send_notification_with_render_error(notification_backend, celery_app, c
     assert len(async_adapter.sent_emails) == 0
 
 
-def test_backend_with_non_serializable_kwargs(renderer, celery_app, celery_worker):
+def test_backend_with_non_serializable_kwargs(renderer, celery_app):
     notification = create_notification()
     config = Config()
     backend = FakeFileBackendWithNonSerializableKWArgs(
@@ -134,3 +135,221 @@ def test_backend_with_non_serializable_kwargs(renderer, celery_app, celery_worke
     assert len(backend.notifications) == 1
 
     backend.clear()
+
+
+def create_one_off_notification():
+    """Create a test one-off notification."""
+    register_context("test_context")(create_notification_context)
+    return OneOffNotification(
+        id=uuid.uuid4(),
+        email_or_phone="test@example.com",
+        first_name="John",
+        last_name="Doe",
+        notification_type=NotificationTypes.EMAIL.value,
+        title="Test One-off Notification",
+        body_template="vintasend_django/emails/test/test_templated_email_body.html",
+        context_name="test_context",
+        context_kwargs={"test": "test"},
+        send_after=None,
+        subject_template="vintasend_django/emails/test/test_templated_email_subject.txt",
+        preheader_template="vintasend_django/emails/test/test_templated_email_preheader.html",
+        status=NotificationStatus.PENDING_SEND.value,
+    )
+
+
+def create_notification_with_attachments():
+    """Create a test notification with attachments."""
+    register_context("test_context")(create_notification_context)
+
+    # Create test attachments
+    attachments = [
+        NotificationAttachment(
+            file=BytesIO(b"test file content"),
+            filename="test.txt",
+            content_type="text/plain",
+            description="Test file"
+        ),
+        NotificationAttachment(
+            file=BytesIO(b"test pdf content"),
+            filename="test.pdf",
+            content_type="application/pdf",
+            is_inline=False,
+            description="Test PDF"
+        )
+    ]
+
+    return Notification(
+        id=uuid.uuid4(),
+        user_id=1,
+        notification_type=NotificationTypes.EMAIL.value,
+        title="Test Notification with Attachments",
+        body_template="vintasend_django/emails/test/test_templated_email_body.html",
+        context_name="test_context",
+        context_kwargs={"test": "test"},
+        send_after=None,
+        subject_template="vintasend_django/emails/test/test_templated_email_subject.txt",
+        preheader_template="vintasend_django/emails/test/test_templated_email_preheader.html",
+        status=NotificationStatus.PENDING_SEND.value,
+        attachments=attachments,
+    )
+
+
+def test_send_one_off_notification(notification_backend, celery_app):
+    """Test sending a one-off notification through Celery."""
+    one_off_notification = create_one_off_notification()
+
+    renderer = FakeTemplateRenderer()
+    async_adapter = AsyncCeleryFakeEmailAdapter(
+        template_renderer=renderer, backend=notification_backend
+    )
+
+    notification_service = NotificationService(
+        [async_adapter],
+        notification_backend,
+    )
+
+    # Store the one-off notification in the backend (simulating persistence)
+    notification_backend.notifications.append(one_off_notification)
+    notification_backend._store_notifications()
+
+    # Send the notification
+    notification_service.send(one_off_notification)
+
+    # Verify the notification was processed by checking the backend state
+    # Create a fresh backend instance to get the latest data from file
+    from vintasend.services.notification_backends.stubs.fake_backend import FakeFileBackend
+    fresh_backend = FakeFileBackend(database_file_name="celery-adapter-tests-notifications.json")
+    updated_notification = fresh_backend.get_notification(one_off_notification.id)
+    assert updated_notification.status == NotificationStatus.SENT.value
+
+
+def test_send_notification_with_attachments(notification_backend, celery_app):
+    """Test sending a notification with attachments through Celery."""
+    notification = create_notification_with_attachments()
+
+    renderer = FakeTemplateRenderer()
+    async_adapter = AsyncCeleryFakeEmailAdapter(
+        template_renderer=renderer, backend=notification_backend
+    )
+
+    notification_service = NotificationService(
+        [async_adapter],
+        notification_backend,
+    )
+
+    notification_backend.notifications.append(notification)
+    notification_backend._store_notifications()
+
+    notification_service.send(notification)
+
+    # Verify the notification was processed by checking the backend state
+    # Create a fresh backend instance to get the latest data from file
+    from vintasend.services.notification_backends.stubs.fake_backend import FakeFileBackend
+    fresh_backend = FakeFileBackend(database_file_name="celery-adapter-tests-notifications.json")
+    updated_notification = fresh_backend.get_notification(notification.id)
+    assert updated_notification.status == NotificationStatus.SENT.value
+
+
+def test_notification_serialization_deserialization():
+    """Test that notifications can be serialized and deserialized properly."""
+    from vintasend_celery.services.notification_adapters.celery_adapter_factory import (
+        CeleryNotificationAdapter,
+    )
+
+    # Create a mock adapter for testing serialization
+    class MockAdapter(CeleryNotificationAdapter):
+        def __init__(self):
+            pass
+
+        def serialize_config(self):
+            return {}
+
+    adapter = MockAdapter()
+
+    # Test regular notification
+    regular_notification = create_notification()
+    serialized = adapter.notification_to_dict(regular_notification)
+    deserialized = adapter.notification_from_dict(serialized)
+
+    assert isinstance(deserialized, Notification)
+    assert deserialized.id == regular_notification.id
+    assert deserialized.user_id == regular_notification.user_id
+    assert deserialized.title == regular_notification.title
+
+    # Test one-off notification
+    one_off_notification = create_one_off_notification()
+    serialized = adapter.notification_to_dict(one_off_notification)
+    deserialized = adapter.notification_from_dict(serialized)
+
+    assert isinstance(deserialized, OneOffNotification)
+    assert deserialized.id == one_off_notification.id
+    assert deserialized.email_or_phone == one_off_notification.email_or_phone
+    assert deserialized.first_name == one_off_notification.first_name
+    assert deserialized.last_name == one_off_notification.last_name
+    assert deserialized.title == one_off_notification.title
+
+
+def test_notification_with_attachments_serialization():
+    """Test that notifications with attachments can be serialized and deserialized properly."""
+    from vintasend_celery.services.notification_adapters.celery_adapter_factory import (
+        CeleryNotificationAdapter,
+    )
+
+    # Create a mock adapter for testing serialization
+    class MockAdapter(CeleryNotificationAdapter):
+        def __init__(self):
+            pass
+
+        def serialize_config(self):
+            return {}
+
+    adapter = MockAdapter()
+
+    # For this test, we'll create a notification object manually with StoredAttachment
+    # since the create_notification_with_attachments creates NotificationAttachment
+    import datetime
+
+    from vintasend.services.dataclasses import StoredAttachment
+
+    # Create a mock stored attachment
+    class MockAttachmentFile:
+        def read(self):
+            return b"test content"
+
+    stored_attachment = StoredAttachment(
+        id="test-attachment-id",
+        filename="test.txt",
+        content_type="text/plain",
+        size=12,
+        checksum="abc123",
+        created_at=datetime.datetime.now(),
+        description="Test attachment",
+        is_inline=False,
+        storage_metadata={},
+        file=MockAttachmentFile()
+    )
+
+    notification = Notification(
+        id=uuid.uuid4(),
+        user_id=1,
+        notification_type=NotificationTypes.EMAIL.value,
+        title="Test Notification with Attachments",
+        body_template="test_template.html",
+        context_name="test_context",
+        context_kwargs={"test": "test"},
+        send_after=None,
+        subject_template="test_subject.txt",
+        preheader_template="test_preheader.html",
+        status=NotificationStatus.PENDING_SEND.value,
+        attachments=[stored_attachment],
+    )
+
+    # Test serialization/deserialization
+    serialized = adapter.notification_to_dict(notification)
+    deserialized = adapter.notification_from_dict(serialized)
+
+    assert isinstance(deserialized, Notification)
+    assert len(deserialized.attachments) == 1
+    assert deserialized.attachments[0].filename == "test.txt"
+    assert deserialized.attachments[0].content_type == "text/plain"
+    assert deserialized.attachments[0].size == 12

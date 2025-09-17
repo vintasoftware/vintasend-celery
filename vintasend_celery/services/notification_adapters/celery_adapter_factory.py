@@ -1,12 +1,18 @@
 import datetime
 import uuid
-from typing import Generic, TypeVar, cast
+from typing import Any, Generic, TypeVar
 
 from celery import Task  # type: ignore
-from vintasend.services.dataclasses import Notification, NotificationContextDict
+from vintasend.services.dataclasses import (
+    Notification,
+    NotificationContextDict,
+    OneOffNotification,
+    StoredAttachment,
+)
 from vintasend.services.notification_adapters.async_base import (
     AsyncBaseNotificationAdapter,
     NotificationDict,
+    OneOffNotificationDict,
 )
 from vintasend.services.notification_backends.base import BaseNotificationBackend
 from vintasend.services.notification_template_renderers.base import BaseNotificationTemplateRenderer
@@ -19,24 +25,152 @@ T = TypeVar("T", bound=BaseNotificationTemplateRenderer)
 class CeleryNotificationAdapter(Generic[B, T], AsyncBaseNotificationAdapter[B, T]):
     send_notification_task: Task
 
-    def delayed_send(self, notification_dict: NotificationDict, context_dict: dict) -> None:
-        notification = self.notification_from_dict(notification_dict)
+    def delayed_send(self, notification_dict: "NotificationDict | OneOffNotificationDict", context_dict: dict) -> None:
+        # Convert the typed dict to a regular dict for our internal processing
+        notification_dict_any = dict(notification_dict)
+        notification = self.notification_from_dict(notification_dict_any)
         context = NotificationContextDict(**context_dict)
         super().send(notification, context)  # type: ignore
 
-    def notification_to_dict(self, notification: "Notification") -> NotificationDict:
-        non_serializable_fields = ["send_after"]
+    def notification_to_dict(self, notification: "Notification | OneOffNotification") -> dict[str, Any]:
+        """Convert a notification (regular or one-off) to a dictionary for serialization."""
+        non_serializable_fields = ["send_after", "attachments", "created_at", "updated_at"]
         serialized_notification = {}
+
         for field in notification.__dataclass_fields__.keys():
             if field in non_serializable_fields:
                 continue
             serialized_notification[field] = getattr(notification, field)
 
+        # Handle send_after serialization
         serialized_notification["send_after"] = (
             notification.send_after.isoformat() if notification.send_after else None
         )
 
-        return cast(NotificationDict, serialized_notification)
+        # Handle attachments separately - for now we'll add a custom field
+        # This will be handled by the background task when processing
+        if hasattr(notification, 'attachments') and notification.attachments:
+            serialized_notification["_attachments"] = [
+                self._serialize_attachment(attachment) for attachment in notification.attachments
+            ]
+        else:
+            serialized_notification["_attachments"] = []
+
+        # Add a field to distinguish between regular and one-off notifications
+        serialized_notification["_notification_type"] = (
+            "one_off" if isinstance(notification, OneOffNotification) else "regular"
+        )
+
+        # Add specific fields based on notification type
+        if isinstance(notification, OneOffNotification):
+            # Set adapter_extra_parameters if missing
+            if "adapter_extra_parameters" not in serialized_notification:
+                serialized_notification["adapter_extra_parameters"] = getattr(notification, 'adapter_extra_parameters', {})
+        else:
+            # For regular notifications, ensure adapter_extra_parameters exists
+            if "adapter_extra_parameters" not in serialized_notification:
+                serialized_notification["adapter_extra_parameters"] = getattr(notification, 'adapter_extra_parameters', None)
+
+        # Ensure context_used exists
+        if "context_used" not in serialized_notification:
+            serialized_notification["context_used"] = getattr(notification, 'context_used', None)
+
+        return serialized_notification
+
+    def _serialize_attachment(self, attachment) -> dict:
+        """Serialize an attachment (NotificationAttachment or StoredAttachment) for transmission."""
+        from vintasend.services.dataclasses import NotificationAttachment, StoredAttachment
+
+        if isinstance(attachment, StoredAttachment):
+            # Handle already stored attachments
+            return {
+                "id": str(attachment.id),
+                "filename": attachment.filename,
+                "content_type": attachment.content_type,
+                "size": attachment.size,
+                "checksum": attachment.checksum,
+                "created_at": attachment.created_at.isoformat(),
+                "description": attachment.description,
+                "is_inline": attachment.is_inline,
+                "storage_metadata": attachment.storage_metadata,
+                # Note: We cannot serialize the file object itself
+                # The backend will need to retrieve it when needed
+            }
+        elif isinstance(attachment, NotificationAttachment):
+            # Handle new notification attachments that need to be processed
+            # For now, we'll create a simplified representation
+            # The actual file processing should happen in the backend
+
+            # Calculate size safely based on file type
+            size = 0
+            try:
+                if hasattr(attachment.file, 'tell') and hasattr(attachment.file, 'seek'):
+                    # File-like object
+                    current_pos = attachment.file.tell()  # Save current position
+                    attachment.file.seek(0, 2)  # Seek to end
+                    size = attachment.file.tell()  # Get size
+                    attachment.file.seek(current_pos)  # Restore position
+                elif isinstance(attachment.file, bytes):
+                    size = len(attachment.file)
+                elif isinstance(attachment.file, str):
+                    # File path
+                    import os
+                    if os.path.exists(attachment.file):
+                        size = os.path.getsize(attachment.file)
+                # For other types, leave size as 0
+            except Exception:
+                # If we can't determine size, that's ok
+                size = 0
+
+            return {
+                "id": f"temp_{hash(attachment.filename)}",  # Temporary ID
+                "filename": attachment.filename,
+                "content_type": attachment.content_type,
+                "size": size,
+                "checksum": "placeholder",  # Will be calculated by backend
+                "created_at": datetime.datetime.now().isoformat(),
+                "description": attachment.description,
+                "is_inline": attachment.is_inline,
+                "storage_metadata": {},
+                "_is_notification_attachment": True,  # Flag to indicate this needs processing
+            }
+        else:
+            raise ValueError(f"Unsupported attachment type: {type(attachment)}")
+
+    def _deserialize_attachment(self, attachment_dict: dict) -> StoredAttachment:
+        """Deserialize an attachment dictionary back to StoredAttachment."""
+        # We need to create a placeholder AttachmentFile that can be resolved by the backend
+        from vintasend.services.dataclasses import AttachmentFile
+
+        # Create a dummy AttachmentFile - the actual file will be retrieved by the backend
+        class PlaceholderAttachmentFile(AttachmentFile):
+            def __init__(self, attachment_id):
+                self.attachment_id = attachment_id
+
+            def read(self) -> bytes:
+                raise NotImplementedError("File must be retrieved from backend")
+
+            def stream(self):
+                raise NotImplementedError("File must be retrieved from backend")
+
+            def url(self, expires_in: int = 3600) -> str:
+                raise NotImplementedError("File must be retrieved from backend")
+
+            def delete(self) -> None:
+                raise NotImplementedError("File must be retrieved from backend")
+
+        return StoredAttachment(
+            id=attachment_dict["id"],
+            filename=attachment_dict["filename"],
+            content_type=attachment_dict["content_type"],
+            size=attachment_dict["size"],
+            checksum=attachment_dict["checksum"],
+            created_at=datetime.datetime.fromisoformat(attachment_dict["created_at"]),
+            description=attachment_dict["description"],
+            is_inline=attachment_dict["is_inline"],
+            storage_metadata=attachment_dict["storage_metadata"],
+            file=PlaceholderAttachmentFile(attachment_dict["id"])
+        )
 
     def _convert_to_uuid(self, value: str) -> uuid.UUID | str:
         try:
@@ -44,39 +178,78 @@ class CeleryNotificationAdapter(Generic[B, T], AsyncBaseNotificationAdapter[B, T
         except ValueError:
             return value
 
-    def notification_from_dict(self, notification_dict: NotificationDict) -> "Notification":
+    def notification_from_dict(self, notification_dict: dict[str, Any]) -> "Notification | OneOffNotification":
+        """Convert a dictionary back to a notification (regular or one-off)."""
         send_after = (
             datetime.datetime.fromisoformat(notification_dict["send_after"])
             if notification_dict["send_after"]
             else None
         )
-        return Notification(
-            id=(
-                self._convert_to_uuid(notification_dict["id"])
-                if isinstance(notification_dict["id"], str)
-                else notification_dict["id"]
-            ),
-            user_id=(
-                self._convert_to_uuid(notification_dict["user_id"])
-                if isinstance(notification_dict["user_id"], str)
-                else notification_dict["user_id"]
-            ),
-            context_kwargs={
-                key: self._convert_to_uuid(value) if isinstance(value, str) else value
-                for key, value in notification_dict["context_kwargs"].items()
-            },
-            notification_type=notification_dict["notification_type"],
-            title=notification_dict["title"],
-            body_template=notification_dict["body_template"],
-            context_name=notification_dict["context_name"],
-            subject_template=notification_dict["subject_template"],
-            preheader_template=notification_dict["preheader_template"],
-            status=notification_dict["status"],
-            context_used=notification_dict["context_used"],
-            send_after=send_after,
-        )
 
-    def send(self, notification: "Notification", context: "NotificationContextDict") -> None:
+        # Deserialize attachments if present
+        attachments = []
+        if notification_dict.get("_attachments"):
+            attachments = [
+                self._deserialize_attachment(attachment_dict)
+                for attachment_dict in notification_dict["_attachments"]
+            ]
+
+        # Check if this is a one-off notification
+        if notification_dict.get("_notification_type") == "one_off" or "email_or_phone" in notification_dict:
+            return OneOffNotification(
+                id=(
+                    self._convert_to_uuid(notification_dict["id"])
+                    if isinstance(notification_dict["id"], str)
+                    else notification_dict["id"]
+                ),
+                email_or_phone=notification_dict["email_or_phone"],
+                first_name=notification_dict["first_name"],
+                last_name=notification_dict["last_name"],
+                notification_type=notification_dict["notification_type"],
+                title=notification_dict["title"],
+                body_template=notification_dict["body_template"],
+                context_name=notification_dict["context_name"],
+                context_kwargs={
+                    key: self._convert_to_uuid(value) if isinstance(value, str) else value
+                    for key, value in notification_dict["context_kwargs"].items()
+                },
+                subject_template=notification_dict["subject_template"],
+                preheader_template=notification_dict["preheader_template"],
+                status=notification_dict["status"],
+                send_after=send_after,
+                adapter_extra_parameters=notification_dict.get("adapter_extra_parameters", {}),
+                attachments=attachments,
+            )
+        else:
+            # Regular notification
+            return Notification(
+                id=(
+                    self._convert_to_uuid(notification_dict["id"])
+                    if isinstance(notification_dict["id"], str)
+                    else notification_dict["id"]
+                ),
+                user_id=(
+                    self._convert_to_uuid(notification_dict["user_id"])
+                    if isinstance(notification_dict["user_id"], str)
+                    else notification_dict["user_id"]
+                ),
+                context_kwargs={
+                    key: self._convert_to_uuid(value) if isinstance(value, str) else value
+                    for key, value in notification_dict["context_kwargs"].items()
+                },
+                notification_type=notification_dict["notification_type"],
+                title=notification_dict["title"],
+                body_template=notification_dict["body_template"],
+                context_name=notification_dict["context_name"],
+                subject_template=notification_dict["subject_template"],
+                preheader_template=notification_dict["preheader_template"],
+                status=notification_dict["status"],
+                context_used=notification_dict.get("context_used"),
+                send_after=send_after,
+                attachments=attachments,
+            )
+
+    def send(self, notification: "Notification | OneOffNotification", context: "NotificationContextDict") -> None:
         self.send_notification_task.delay(
             notification=self.notification_to_dict(notification),
             context=context,

@@ -10,7 +10,7 @@ This package doesn't implement an actual adapter, but it helps you to make an ex
 To install VintaSend Celery you need to run the following command:
 
 ```shell
-pip install vinstasend vintasend-celery
+pip install vintasend vintasend-celery
 ```
 
 
