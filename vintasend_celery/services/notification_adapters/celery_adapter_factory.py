@@ -4,6 +4,7 @@ from typing import Any, Generic, TypeVar
 
 from celery import Task  # type: ignore
 from vintasend.services.dataclasses import (
+    AttachmentFile,
     Notification,
     NotificationContextDict,
     OneOffNotification,
@@ -20,6 +21,44 @@ from vintasend.services.notification_template_renderers.base import BaseNotifica
 
 B = TypeVar("B", bound=BaseNotificationBackend)
 T = TypeVar("T", bound=BaseNotificationTemplateRenderer)
+
+
+class PlaceholderAttachmentFile(AttachmentFile):
+    """
+    Placeholder for AttachmentFile.
+    All file operations raise NotImplementedError and must be handled by the caller.
+    Use this class only when the actual file is expected to be retrieved by the backend.
+    """
+    def __init__(self, attachment_id):
+        self.attachment_id = attachment_id
+
+    def read(self) -> bytes:
+        """
+        Attempting to read will raise NotImplementedError.
+        Caller must handle this exception and retrieve the file from the backend.
+        """
+        raise NotImplementedError("File must be retrieved from backend")
+
+    def stream(self):
+        """
+        Attempting to stream will raise NotImplementedError.
+        Caller must handle this exception and retrieve the file from the backend.
+        """
+        raise NotImplementedError("File must be retrieved from backend")
+
+    def url(self, expires_in: int = 3600) -> str:
+        """
+        Attempting to get a URL will raise NotImplementedError.
+        Caller must handle this exception and retrieve the file from the backend.
+        """
+        raise NotImplementedError("File must be retrieved from backend")
+
+    def delete(self) -> None:
+        """
+        Attempting to delete will raise NotImplementedError.
+        Caller must handle this exception and perform deletion via the backend.
+        """
+        raise NotImplementedError("File must be retrieved from backend")
 
 
 class CeleryNotificationAdapter(Generic[B, T], AsyncBaseNotificationAdapter[B, T]):
@@ -61,15 +100,10 @@ class CeleryNotificationAdapter(Generic[B, T], AsyncBaseNotificationAdapter[B, T
             "one_off" if isinstance(notification, OneOffNotification) else "regular"
         )
 
-        # Add specific fields based on notification type
-        if isinstance(notification, OneOffNotification):
-            # Set adapter_extra_parameters if missing
-            if "adapter_extra_parameters" not in serialized_notification:
-                serialized_notification["adapter_extra_parameters"] = getattr(notification, 'adapter_extra_parameters', {})
-        else:
-            # For regular notifications, ensure adapter_extra_parameters exists
-            if "adapter_extra_parameters" not in serialized_notification:
-                serialized_notification["adapter_extra_parameters"] = getattr(notification, 'adapter_extra_parameters', None)
+        # Ensure adapter_extra_parameters exists for all notification types
+        if "adapter_extra_parameters" not in serialized_notification:
+            default_value: dict[str, Any] | None = {} if isinstance(notification, OneOffNotification) else None
+            serialized_notification["adapter_extra_parameters"] = getattr(notification, 'adapter_extra_parameters', default_value)
 
         # Ensure context_used exists
         if "context_used" not in serialized_notification:
@@ -123,11 +157,11 @@ class CeleryNotificationAdapter(Generic[B, T], AsyncBaseNotificationAdapter[B, T
                 size = 0
 
             return {
-                "id": f"temp_{hash(attachment.filename)}",  # Temporary ID
+                "id": f"temp_{uuid.uuid4()}",  # Temporary ID, guaranteed unique
                 "filename": attachment.filename,
                 "content_type": attachment.content_type,
                 "size": size,
-                "checksum": "placeholder",  # Will be calculated by backend
+                "checksum": None,  # Will be calculated by backend
                 "created_at": datetime.datetime.now().isoformat(),
                 "description": attachment.description,
                 "is_inline": attachment.is_inline,
@@ -139,26 +173,7 @@ class CeleryNotificationAdapter(Generic[B, T], AsyncBaseNotificationAdapter[B, T
 
     def _deserialize_attachment(self, attachment_dict: dict) -> StoredAttachment:
         """Deserialize an attachment dictionary back to StoredAttachment."""
-        # We need to create a placeholder AttachmentFile that can be resolved by the backend
-        from vintasend.services.dataclasses import AttachmentFile
-
-        # Create a dummy AttachmentFile - the actual file will be retrieved by the backend
-        class PlaceholderAttachmentFile(AttachmentFile):
-            def __init__(self, attachment_id):
-                self.attachment_id = attachment_id
-
-            def read(self) -> bytes:
-                raise NotImplementedError("File must be retrieved from backend")
-
-            def stream(self):
-                raise NotImplementedError("File must be retrieved from backend")
-
-            def url(self, expires_in: int = 3600) -> str:
-                raise NotImplementedError("File must be retrieved from backend")
-
-            def delete(self) -> None:
-                raise NotImplementedError("File must be retrieved from backend")
-
+        # WARNING: PlaceholderAttachmentFile methods raise NotImplementedError. Handle accordingly.
         return StoredAttachment(
             id=attachment_dict["id"],
             filename=attachment_dict["filename"],
