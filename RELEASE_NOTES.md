@@ -1,5 +1,12 @@
 # Release Notes
 
+## Version 1.2.0 (2026-06-14)
+
+* Release coordination bump to track `vintasend` / `vintasend-django` 1.2.0 (in-app list-all,
+  pagination + count helpers, and bulk mark-as-read). No code changes — this package ships only
+  Celery adapter/tasks and does not subclass the notification backend ABC, so the new abstract
+  methods do not affect it.
+
 ## Version 1.1.3 (2026-06-12)
 
 * Bump vintasend to 1.1.3
