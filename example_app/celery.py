@@ -1,23 +1,31 @@
-from datetime import datetime
-from decimal import Decimal
+"""A minimal host wiring used by the test suite as a reference for VintaSend 2.0 + Celery.
 
-import pytest
+The web process sends through a `NotificationService` whose adapter is a background adapter
+and whose queue service is a `CeleryNotificationQueueService`. `send()` enqueues the
+notification id onto Celery; the Celery task runs VintaSend's `send_notification`, which
+reloads the notification from the backend and delivers it through the adapter's `send()`.
+Tasks run eagerly here (`task_always_eager`), so the whole round trip happens in-process.
+
+The worker resolves its `NotificationService` in one of two documented ways:
+
+* `NOTIFICATION_SERVICE_FACTORY` -- the production path. The worker builds its own service
+  once per process from that setting. It needs a live database session, so the host, not
+  VintaSend, supplies the factory.
+* passing a `notification_service` to `send_notification` explicitly -- what the helpers here
+  do, so the example stays independent of Django/Flask/FastAPI (in a plain-Python process
+  VintaSend only reads `NOTIFICATION_SERVICE_FACTORY` from the environment once a framework
+  is detected).
+"""
+
+import uuid
+
 from celery import Celery  # type: ignore
-from vintasend.services.notification_adapters.stubs.fake_adapter import (
-    FakeEmailAdapter,
-)
-from vintasend.services.notification_backends.stubs.fake_backend import (
-    Config,
-    FakeFileBackend,
-    FakeFileBackendWithNonSerializableKWArgs,
-)
-from vintasend.services.notification_template_renderers.stubs.fake_templated_email_renderer import (
-    FakeTemplateRenderer,
-)
+from vintasend.services.notification_adapters.stubs.fake_adapter import FakeAsyncEmailAdapter
+from vintasend.services.notification_service import NotificationService
 from vintasend.tasks.background_tasks import send_notification
 
-from vintasend_celery.services.notification_adapters.celery_adapter_factory import (
-    CeleryNotificationAdapter,
+from vintasend_celery.services.notification_queue_services.celery_queue_service import (
+    CeleryNotificationQueueService,
 )
 
 
@@ -26,42 +34,26 @@ celery_app = Celery(
 )
 
 
-@celery_app.task
-def send_notification_task(*args, **kwargs):
-    send_notification(*args, **kwargs)
+class CeleryFakeEmailAdapter(FakeAsyncEmailAdapter):
+    """Background fake email adapter: `send()` is the real delivery, run by the worker."""
 
 
-class AsyncCeleryFakeEmailAdapter(
-    CeleryNotificationAdapter[FakeFileBackend, FakeTemplateRenderer],
-    FakeEmailAdapter[FakeFileBackend, FakeTemplateRenderer],
-):
-    send_notification_task = send_notification_task
+def make_celery_queue_service(
+    notification_service: NotificationService,
+) -> CeleryNotificationQueueService:
+    """Wire a Celery queue service whose worker task delivers through `notification_service`.
 
+    Registers a Celery task that hands the notification id to `send_notification` along with
+    an explicit service, then returns a `CeleryNotificationQueueService` bound to that task.
+    A real host would instead register `send_notification` with `send_notification_task_factory`
+    and let the worker build its service from `NOTIFICATION_SERVICE_FACTORY`.
 
-class AsyncCeleryFakeEmailAdapterWithBackendWithNonSerializableKWArgs(
-    CeleryNotificationAdapter[FakeFileBackendWithNonSerializableKWArgs, FakeTemplateRenderer],
-    FakeEmailAdapter[FakeFileBackendWithNonSerializableKWArgs, FakeTemplateRenderer],
-):
-    send_notification_task = send_notification_task
-    config: Config
+    A unique task name keeps repeated wirings on the shared `celery_app` from colliding in the
+    task registry -- each call captures its own service.
+    """
 
-    def serialize_config(self) -> dict[str, str]:
-        return {
-            "config_a": str(self.config.config_a),
-            "config_b": self.config.config_b.isoformat(),
-        }
+    @celery_app.task(name=f"vintasend_celery.send_notification_task.{uuid.uuid4().hex}")
+    def send_notification_task(notification_id):
+        send_notification(notification_id, notification_service=notification_service)
 
-    @staticmethod
-    def restore_config(config: dict[str, str]) -> Config:
-        return Config(
-            config_a=Decimal(config["config_a"]),
-            config_b=datetime.fromisoformat(config["config_b"]),
-        )
-
-
-@pytest.fixture(scope="session")
-def celery_includes():
-    return [
-        "proj.tests.tasks",
-        "proj.tests.celery_signal_handlers",
-    ]
+    return CeleryNotificationQueueService(send_notification_task=send_notification_task)
