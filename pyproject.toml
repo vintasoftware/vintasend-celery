@@ -12,7 +12,7 @@ include = [
 
 [tool.poetry.dependencies]
 python = "<3.14,>=3.10"
-vintasend = "^2.0.0"
+vintasend = { path = "../..", develop = true }
 celery = "^5.4.0"
 
 
@@ -23,11 +23,24 @@ pytest = "^8.3.3"
 pytest-xdist = {version = "^3.6.1", extras=["psutil"]}
 pytest-cov = "^6.0.0"
 pytest-celery = "^1.2.0"
+mypy = "^2.3.0"
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
+
+[tool.mypy]
+files = ["vintasend_celery"]
+# Must track the MINIMUM Python in [tool.poetry.dependencies]. Checking against a
+# newer version hides errors that only appear on the oldest interpreter we support.
+python_version = "3.10"
+show_error_codes = true
+# This package ships py.typed, so its re-export surface is part of the public API:
+# require anything re-exported to be declared in __all__ rather than leaking implicitly.
+no_implicit_reexport = true
+strict_equality = true
+warn_no_return = true
 
 [tool.ruff]
 select = [

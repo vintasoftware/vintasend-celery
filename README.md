@@ -53,7 +53,9 @@ send_notification_task = send_notification_task_factory(celery_app)
 queue_service = CeleryNotificationQueueService(send_notification_task=send_notification_task)
 
 notification_service = NotificationService(
-    notification_adapters=[MyBackgroundEmailAdapter(...)],  # subclasses BackgroundNotificationAdapter
+    notification_adapters=[
+        MyBackgroundEmailAdapter(...)
+    ],  # subclasses BackgroundNotificationAdapter
     notification_backend=MyBackend(...),
     notification_queue_service=queue_service,
 )

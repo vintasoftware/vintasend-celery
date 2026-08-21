@@ -92,9 +92,7 @@ def test_send_enqueues_through_queue_service(notification_backend, celery_app):
 
     # send() hands the id to the queue service instead of delivering in the foreground. With
     # the enqueue suppressed, no worker runs, so nothing is delivered.
-    with patch.object(
-        service.notification_queue_service, "enqueue_notification"
-    ) as mock_enqueue:
+    with patch.object(service.notification_queue_service, "enqueue_notification") as mock_enqueue:
         notification = service.create_notification(**create_kwargs())
 
     mock_enqueue.assert_called_once_with(notification.id)
