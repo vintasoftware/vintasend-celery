@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "vintasend-celery"
-version = "3.1.1"
+version = "3.2.0"
 description = "Celery adapter for VintaSend"
 authors = ["Hugo bessa <hugo@vinta.com.br>"]
 license = "MIT"
@@ -12,7 +12,7 @@ include = [
 
 [tool.poetry.dependencies]
 python = "<3.15,>=3.10"
-vintasend = "3.1.1"
+vintasend = "3.2.0"
 celery = "^5.4.0"
 
 
